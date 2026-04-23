@@ -1,5 +1,8 @@
 package com.tugrupo.appirest.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,8 +24,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.tugrupo.appirest.model.Cart
 import com.tugrupo.appirest.model.CartItem
 import com.tugrupo.appirest.model.Product
+import com.tugrupo.appirest.viewmodel.CartSyncState
 import com.tugrupo.appirest.viewmodel.CatalogState
 import com.tugrupo.appirest.viewmodel.CatalogViewModel
 
@@ -33,6 +38,8 @@ fun CatalogScreen(viewModel: CatalogViewModel = viewModel()) {
     val snackbarHostState = remember { SnackbarHostState() }
     val message = viewModel.snackbarMessage
     var showCart by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
+    var showOrderSuccess by remember { mutableStateOf<Cart?>(null) }
 
     LaunchedEffect(message) {
         message?.let { text ->
@@ -49,11 +56,26 @@ fun CatalogScreen(viewModel: CatalogViewModel = viewModel()) {
         }
     }
 
+    // Dialog de éxito tras checkout
+    showOrderSuccess?.let { cart ->
+        OrderSuccessDialog(
+            cart = cart,
+            onDismiss = {
+                showOrderSuccess = null
+                viewModel.resetCartSyncState()
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("CatalogApp") },
                 actions = {
+                    // Historial de carritos
+                    IconButton(onClick = { showHistory = true }) {
+                        Icon(Icons.Default.History, contentDescription = "Historial")
+                    }
                     // Ícono del carrito con badge
                     BadgedBox(
                         badge = {
@@ -64,10 +86,7 @@ fun CatalogScreen(viewModel: CatalogViewModel = viewModel()) {
                         modifier = Modifier.padding(end = 12.dp)
                     ) {
                         IconButton(onClick = { showCart = true }) {
-                            Icon(
-                                imageVector = Icons.Default.ShoppingCart,
-                                contentDescription = "Ver carrito"
-                            )
+                            Icon(Icons.Default.ShoppingCart, contentDescription = "Ver carrito")
                         }
                     }
                 }
@@ -100,11 +119,21 @@ fun CatalogScreen(viewModel: CatalogViewModel = viewModel()) {
         }
     }
 
-    // Bottom Sheet del carrito
     if (showCart) {
         CartBottomSheet(
             viewModel = viewModel,
-            onDismiss = { showCart = false }
+            onDismiss = { showCart = false },
+            onCheckoutSuccess = { cart ->
+                showCart = false
+                showOrderSuccess = cart
+            }
+        )
+    }
+
+    if (showHistory) {
+        CartHistoryBottomSheet(
+            viewModel = viewModel,
+            onDismiss = { showHistory = false }
         )
     }
 }
@@ -141,7 +170,6 @@ fun ProductCard(product: Product, viewModel: CatalogViewModel) {
                     .clip(RoundedCornerShape(8.dp)),
                 contentScale = ContentScale.Crop
             )
-
             Column(
                 modifier = Modifier
                     .padding(start = 12.dp)
@@ -162,24 +190,17 @@ fun ProductCard(product: Product, viewModel: CatalogViewModel) {
                     fontSize = 15.sp
                 )
             }
-
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                // Botón agregar al carrito
-                IconButton(
-                    onClick = { viewModel.addToCart(product) }
-                ) {
+                IconButton(onClick = { viewModel.addToCart(product) }) {
                     Icon(
                         imageVector = Icons.Default.AddShoppingCart,
                         contentDescription = "Agregar al carrito",
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
-                // Botones Editar / Eliminar
                 Row {
                     IconButton(
-                        onClick = {
-                            viewModel.editProduct(product.id, product.copy(title = product.title + " (editado)"))
-                        },
+                        onClick = { viewModel.editProduct(product.id, product.copy(title = product.title + " (editado)")) },
                         modifier = Modifier.size(36.dp)
                     ) {
                         Icon(Icons.Default.Edit, contentDescription = "Editar", modifier = Modifier.size(18.dp))
@@ -200,8 +221,13 @@ fun ProductCard(product: Product, viewModel: CatalogViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CartBottomSheet(viewModel: CatalogViewModel, onDismiss: () -> Unit) {
+fun CartBottomSheet(
+    viewModel: CatalogViewModel,
+    onDismiss: () -> Unit,
+    onCheckoutSuccess: (Cart) -> Unit
+) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val isSyncing = viewModel.cartSyncState is CartSyncState.Syncing
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -235,7 +261,6 @@ fun CartBottomSheet(viewModel: CatalogViewModel, onDismiss: () -> Unit) {
             Spacer(modifier = Modifier.height(12.dp))
 
             if (viewModel.cartItems.isEmpty()) {
-                // Estado vacío
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -258,7 +283,6 @@ fun CartBottomSheet(viewModel: CatalogViewModel, onDismiss: () -> Unit) {
                     }
                 }
             } else {
-                // Lista de ítems
                 LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
                     items(viewModel.cartItems) { item ->
                         CartItemRow(
@@ -288,27 +312,48 @@ fun CartBottomSheet(viewModel: CatalogViewModel, onDismiss: () -> Unit) {
                     )
                 }
 
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Resumen de ítems
+                Text(
+                    text = "${viewModel.cartCount} ${if (viewModel.cartCount == 1) "producto" else "productos"} en el carrito",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Botón de compra
+                // Botón de compra — llama a la API de Carts
                 Button(
                     onClick = {
-                        viewModel.clearCart()
-                        onDismiss()
+                        viewModel.checkoutCart { cart -> onCheckoutSuccess(cart) }
                     },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    enabled = !isSyncing
                 ) {
-                    Icon(Icons.Default.CheckCircle, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Finalizar compra", fontSize = 16.sp)
+                    if (isSyncing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Procesando pedido…", fontSize = 16.sp)
+                    } else {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Finalizar compra", fontSize = 16.sp)
+                    }
                 }
             }
         }
     }
 }
+
+// ── Fila de ítem del carrito ─────────────────────────────────────────────────
 
 @Composable
 fun CartItemRow(
@@ -331,7 +376,6 @@ fun CartItemRow(
                 .clip(RoundedCornerShape(8.dp)),
             contentScale = ContentScale.Crop
         )
-
         Column(
             modifier = Modifier
                 .padding(start = 12.dp)
@@ -351,8 +395,6 @@ fun CartItemRow(
                 fontSize = 13.sp
             )
         }
-
-        // Controles de cantidad
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onDecrease, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Default.Remove, contentDescription = "Disminuir", modifier = Modifier.size(16.dp))
@@ -376,6 +418,146 @@ fun CartItemRow(
             IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Default.Close, contentDescription = "Eliminar", tint = Color.Red, modifier = Modifier.size(16.dp))
             }
+        }
+    }
+}
+
+// ── Dialog de orden exitosa ───────────────────────────────────────────────────
+
+@Composable
+fun OrderSuccessDialog(cart: Cart, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = Color(0xFF4CAF50),
+                modifier = Modifier.size(48.dp)
+            )
+        },
+        title = { Text("¡Pedido realizado!", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = "Tu pedido #${cart.id} fue creado exitosamente en el servidor.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "${cart.products.size} ${if (cart.products.size == 1) "producto" else "productos"} enviados",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Fecha: ${cart.date}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("Aceptar") }
+        }
+    )
+}
+
+// ── Historial de carritos (GET /carts) ────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CartHistoryBottomSheet(viewModel: CatalogViewModel, onDismiss: () -> Unit) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 32.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Historial de pedidos",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                IconButton(onClick = { viewModel.loadRemoteCarts() }) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refrescar")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (viewModel.remoteCarts.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(160.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.History,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MaterialTheme.colorScheme.outline
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Sin historial de pedidos", color = MaterialTheme.colorScheme.outline)
+                    }
+                }
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 500.dp)) {
+                    items(viewModel.remoteCarts) { cart ->
+                        CartHistoryItem(
+                            cart = cart,
+                            onDelete = { viewModel.deleteRemoteCart(cart.id) }
+                        )
+                        HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CartHistoryItem(cart: Cart, onDelete: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Pedido #${cart.id}",
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp
+            )
+            Text(
+                text = "Usuario: ${cart.userId}  •  Fecha: ${cart.date}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+            Text(
+                text = "${cart.products.size} ${if (cart.products.size == 1) "producto" else "productos"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.secondary
+            )
+        }
+        IconButton(onClick = onDelete) {
+            Icon(Icons.Default.Delete, contentDescription = "Eliminar pedido", tint = Color.Red)
         }
     }
 }

@@ -6,11 +6,18 @@ import retrofit2.converter.gson.GsonConverterFactory
 object RetrofitClient {
     private const val BASE_URL = "https://fakestoreapi.com/"
 
-    val apiService: ProductApiService by lazy {
+    private val retrofit: Retrofit by lazy {
         Retrofit.Builder()
             .baseUrl(BASE_URL)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
-            .create(ProductApiService::class.java)
+    }
+
+    val apiService: ProductApiService by lazy {
+        retrofit.create(ProductApiService::class.java)
+    }
+
+    val cartApiService: CartApiService by lazy {
+        retrofit.create(CartApiService::class.java)
     }
 }
