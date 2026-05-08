@@ -1,5 +1,8 @@
 package com.tugrupo.appirest.viewmodel
 
+import android.content.Context
+import android.content.Intent
+import android.os.Build
 import androidx.compose.runtime.*
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -10,6 +13,9 @@ import com.tugrupo.appirest.model.Cart
 import com.tugrupo.appirest.model.CartItem
 import com.tugrupo.appirest.model.CartProduct
 import com.tugrupo.appirest.model.Product
+import com.tugrupo.appirest.services.CartSyncService
+import com.tugrupo.appirest.services.SyncEvent   // <- import directo, sin ambigüedad
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -53,11 +59,10 @@ class CatalogViewModel : ViewModel() {
 
     // ── Repositorios ──────────────────────────────────────────
     private val productRepository = ProductRepository(RetrofitClient.apiService)
-    private val cartRepository = CartRepository(RetrofitClient.cartApiService)
+    private val cartRepository    = CartRepository(RetrofitClient.cartApiService)
 
     private var lastAction: (() -> Unit)? = null
 
-    // ── Usuario simulado (en una app real vendría del login) ──
     private val currentUserId = 1
 
     init {
@@ -164,26 +169,19 @@ class CatalogViewModel : ViewModel() {
     }
 
     // ──────────────────────────────────────────────────────────
-    // SINCRONIZACIÓN CON LA API DE CARTS (fakestoreapi)
+    // SINCRONIZACIÓN CON LA API DE CARTS
     // ──────────────────────────────────────────────────────────
 
-    /**
-     * Carga todos los carritos del servidor (GET /carts).
-     * Útil para mostrar historial de órdenes del usuario.
-     */
     fun loadRemoteCarts() {
         viewModelScope.launch {
             try {
                 remoteCarts = cartRepository.getAllCarts()
             } catch (e: Exception) {
-                // No bloqueamos la UI si falla la carga de carritos remotos
+                // No bloqueamos la UI si falla
             }
         }
     }
 
-    /**
-     * Carga los carritos de un usuario específico (GET /carts/user/{userId}).
-     */
     fun loadCartsByUser(userId: Int = currentUserId) {
         viewModelScope.launch {
             try {
@@ -195,13 +193,32 @@ class CatalogViewModel : ViewModel() {
     }
 
     /**
-     * Convierte el carrito local y lo envía a la API (POST /carts).
-     * Se llama al finalizar la compra.
+     * Envía el carrito a la API y actualiza la notificación obligatoria
+     * con el resultado REAL de la operación de red.
+     *
+     * Flujo:
+     *  1. Lanza CartSyncService  → notificación "Enviando…" (barra indeterminada)
+     *  2. Hace POST /carts
+     *  3a. Éxito  → emite SyncEvent.Success  → notificación "✅ Pedido #N confirmado"
+     *  3b. Error  → emite SyncEvent.Failure  → notificación "❌ Error al enviar"
+     *  4. El servicio se autodestruye y la notificación desaparece sola
      */
-    fun checkoutCart(onSuccess: (Cart) -> Unit) {
+    fun checkoutCart(context: Context, onSuccess: (Cart) -> Unit) {
         if (cartItems.isEmpty()) {
             snackbarMessage = "El carrito está vacío"
             return
+        }
+
+        // 1. Señaliza estado inicial y lanza el servicio
+        CartSyncService.syncEvent.value = SyncEvent.Sending
+        val serviceIntent = Intent(context, CartSyncService::class.java).apply {
+            putExtra(CartSyncService.EXTRA_ITEM_COUNT, cartCount)
+            putExtra(CartSyncService.EXTRA_TOTAL, cartTotal)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(serviceIntent)
+        } else {
+            context.startService(serviceIntent)
         }
 
         viewModelScope.launch {
@@ -209,39 +226,49 @@ class CatalogViewModel : ViewModel() {
             try {
                 val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
                 val cartPayload = Cart(
-                    userId = currentUserId,
-                    date = today,
+                    userId   = currentUserId,
+                    date     = today,
                     products = cartItems.map { item ->
-                        CartProduct(
-                            productId = item.product.id,
-                            quantity = item.quantity
-                        )
+                        CartProduct(productId = item.product.id, quantity = item.quantity)
                     }
                 )
+
+                // 2. Llamada real a la API
                 val response = cartRepository.createCart(cartPayload)
+
+                // Mantiene la notificación obligatoria visible el tiempo suficiente
+                // para que el usuario compruebe que NO se puede deslizar ni quitar.
+                // En producción con una API real este delay no es necesario porque
+                // la operación de red tarda varios segundos por sí sola.
+                delay(4000)
+
+                // 3a. Éxito → notificación muestra el ID del pedido real
+                CartSyncService.syncEvent.value = SyncEvent.Success(response.id)
+
                 cartSyncState = CartSyncState.Synced(response.id)
                 snackbarMessage = "✅ Pedido #${response.id} creado exitosamente"
                 clearCart()
-                loadRemoteCarts()          // refrescar historial
+                loadRemoteCarts()
                 onSuccess(response)
+
             } catch (e: Exception) {
+                // 3b. Error → notificación muestra el motivo
+                CartSyncService.syncEvent.value = SyncEvent.Failure("Intenta de nuevo más tarde")
+
                 cartSyncState = CartSyncState.Error("Error al procesar pedido: ${e.message}")
                 snackbarMessage = "Error al finalizar compra: ${e.message}"
             }
         }
     }
 
-    /**
-     * Actualiza un carrito existente en la API (PUT /carts/{id}).
-     */
     fun updateRemoteCart(cartId: Int) {
         viewModelScope.launch {
             cartSyncState = CartSyncState.Syncing
             try {
                 val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
                 val cartPayload = Cart(
-                    userId = currentUserId,
-                    date = today,
+                    userId   = currentUserId,
+                    date     = today,
                     products = cartItems.map { item ->
                         CartProduct(productId = item.product.id, quantity = item.quantity)
                     }
@@ -256,9 +283,6 @@ class CatalogViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Elimina un carrito de la API (DELETE /carts/{id}).
-     */
     fun deleteRemoteCart(cartId: Int) {
         viewModelScope.launch {
             try {
@@ -275,7 +299,7 @@ class CatalogViewModel : ViewModel() {
     // UTILIDADES
     // ──────────────────────────────────────────────────────────
 
-    fun resetSnackbarMessage() { snackbarMessage = null }
-    fun retryLastAction() { lastAction?.invoke() }
-    fun resetCartSyncState() { cartSyncState = CartSyncState.Idle }
+    fun resetSnackbarMessage()  { snackbarMessage = null }
+    fun retryLastAction()       { lastAction?.invoke() }
+    fun resetCartSyncState()    { cartSyncState = CartSyncState.Idle }
 }

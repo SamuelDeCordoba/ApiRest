@@ -1,5 +1,8 @@
 package com.tugrupo.appirest.ui.screens
 
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -18,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -40,6 +44,20 @@ fun CatalogScreen(viewModel: CatalogViewModel = viewModel()) {
     var showCart by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var showOrderSuccess by remember { mutableStateOf<Cart?>(null) }
+
+    // ── Solicitar permiso POST_NOTIFICATIONS en Android 13+ ──────────────────
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        // Si el usuario niega, el servicio sigue corriendo pero sin notificación visible
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     LaunchedEffect(message) {
         message?.let { text ->
@@ -229,6 +247,9 @@ fun CartBottomSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val isSyncing = viewModel.cartSyncState is CartSyncState.Syncing
 
+    // Necesario para pasarle el context al ViewModel al hacer checkout
+    val context = LocalContext.current
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -323,10 +344,10 @@ fun CartBottomSheet(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Botón de compra — llama a la API de Carts
+                // Botón de compra — pasa el context para lanzar el Foreground Service
                 Button(
                     onClick = {
-                        viewModel.checkoutCart { cart -> onCheckoutSuccess(cart) }
+                        viewModel.checkoutCart(context) { cart -> onCheckoutSuccess(cart) }
                     },
                     modifier = Modifier
                         .fillMaxWidth()
